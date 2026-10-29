@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sistema de Diagnóstico Financiero</title>
+<title>Sistema de Diagnóstico Financiero v3.3</title>
 <!-- Librería externa para procesamiento de archivos Excel (XLSX / CSV).
      A8: SheetJS 0.20.3 desde su CDN oficial (corrige CVE-2023-30533 y CVE-2024-22363;
      la versión 0.18.5 de npm/jsDelivr ya no recibe correcciones).
@@ -93,6 +93,10 @@
 .frd-origen-demo { background: #3A3320; color: #E8D9A8; }
 .frd-origen-sin_dato { background: #3B2A2A; color: #F0C4BC; }
 .frd-origen-importado { background: #1F3A33; color: #A9DCC8; }
+.frd-origen-cero_real { background: #24303F; color: #B9C8DC; }
+.frd-origen-error { background: #5A1E1E; color: #FFD2CA; font-weight: 600; }
+.frd-origen-no_aplica { background: #2A2F36; color: #A9B4C6; }
+.frd-version { font-size: .42em; font-weight: 600; letter-spacing: .04em; vertical-align: middle; padding: 1px 7px; border-radius: 3px; border: 1px solid currentColor; opacity: .75; }
 .frd-validacion { border-radius: 3px; padding: 10px 12px; font-size: 12px; line-height: 1.5; margin-bottom: 10px; background: var(--amber-bg); color: #5A4210; border-left: 4px solid var(--amber); }
 .frd-validacion ul { margin: 6px 0 0 18px; padding: 0; }
 
@@ -396,7 +400,7 @@ table.frd-table td.num { font-family: var(--font-mono); }
 
     <header class="frd-header">
       <div>
-        <h1 class="frd-title">Sistema de Diagnóstico Financiero</h1>
+        <h1 class="frd-title">Sistema de Diagnóstico Financiero <span class="frd-version" id="versionSistema" title="Versión del sistema">v3.3</span></h1>
         <p class="frd-subtitle">Captura los estados financieros, y el sistema calcula, diagnostica, prioriza y recomienda acciones concretas — no solo razones financieras.</p>
       </div>
       <div class="frd-stamp green" id="stamp">
@@ -811,6 +815,9 @@ table.frd-table td.num { font-family: var(--font-mono); }
           <p class="frd-section-sub">Ejecuta, en este navegador, las pruebas internas del motor de cálculo (metas y bandas, datos faltantes, anualización, lectura de importes, saneamiento de respaldos, identidad contable de los escenarios). No modifica tus datos.</p>
           <div class="frd-track-form"><button type="button" onclick="ejecutarAutodiagnostico()">▶ Ejecutar autodiagnóstico</button><span id="autodiagResumen" style="font-size:12.5px;"></span></div>
           <div id="autodiagContainer"></div>
+          <h3 class="frd-sub-h">Limitaciones conocidas de esta versión</h3>
+          <p class="frd-section-sub">Lo que el sistema todavía no hace o hace con supuestos simplificados. Se documenta para que ninguna falla conocida quede oculta.</p>
+          <div class="frd-diagnosis" id="limitacionesBox"></div>
           <h3 class="frd-sub-h">Notas de la versión 3</h3>
           <div class="frd-diagnosis" id="notasVersionBox"></div>
         </section>
@@ -986,6 +993,7 @@ const days = n => Number.isFinite(n) ? n.toFixed(0)+" días" : "—";
    - Anualización en un solo lugar (V-M2): anualizar(id, valor).
 ========================================================================= */
 const ESQUEMA_VERSION = 3;
+const VERSION_SISTEMA = "3.3";   // identificador visible de la versión estable (título, respaldos y exportaciones)
 const EPS = 1e-9;
 function noEvaluable(n){ return n==="no_aplica" || n==="sin_dato"; }
 function esc(s){ return String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
@@ -995,6 +1003,49 @@ function esSinDato(key){ return origenDe(key)==="sin_dato"; }
 function esDatoReal(key){ const o = origenDe(key); return o==="capturado" || o==="importado"; }
 const ETIQUETA_CAMPO = Object.fromEntries(FIELD_GROUPS.flatMap(g=>g.fields.map(([k,l])=>[k,l])));
 function nombreCampo(k){ return ETIQUETA_CAMPO[k] || k; }
+
+/* v3.2 — CLASIFICACIÓN DE CADA DATO. El sistema distingue:
+   - "valor": dato real distinto de cero;
+   - "cero_real": el usuario capturó o importó un cero (sí entra a los cálculos);
+   - "sin_dato": campo vacío (los indicadores que dependen de él son NO INTERPRETABLES);
+   - "no_aplica": el campo no corresponde (inventarios en servicios sin inventario);
+   - "ejemplo": valor ficticio precargado (modo demostración);
+   - "error": error de captura (negativo donde no se permite, o fechas del periodo invertidas).
+   Un error de captura se trata igual que un dato faltante: el indicador no se califica. */
+const CAMPOS_PUEDEN_SER_NEGATIVOS = ["utilidadNeta","utilidadBruta","capitalContable"];
+const CAMPO_PERIODO = "__periodo";
+ETIQUETA_CAMPO[CAMPO_PERIODO] = "Fechas del periodo";
+/* Indicadores que usan los días del periodo o se anualizan. */
+const USAN_PERIODO = ["dso","dpo","dio","roa","roe","rotCxC","rotInv","rotActivos","rotCxP","ktnPct"];
+function periodoInvalido(){ return !!(f.fechaInicio && f.fechaFin && diasEntreFechas(f.fechaInicio, f.fechaFin)===null); }
+function esErrorCaptura(key){
+  if(key===CAMPO_PERIODO) return periodoInvalido();
+  if(!(key in DEFAULTS) || esSinDato(key)) return false;
+  const v = f[key];
+  if(!Number.isFinite(v)) return true;
+  return v<0 && !CAMPOS_PUEDEN_SER_NEGATIVOS.includes(key);
+}
+function clasificarDato(key){
+  if(isServicios() && CAMPOS_INVENTARIO.includes(key)) return "no_aplica";
+  if(esSinDato(key)) return "sin_dato";
+  if(esErrorCaptura(key)) return "error";
+  if(origenDe(key)==="demo") return "ejemplo";
+  return f[key]===0 ? "cero_real" : "valor";
+}
+const ESTADO_CAMPO_TXT = {ejemplo:"ejemplo", sin_dato:"sin dato", cero_real:"cero real", error:"⚠ error de captura", no_aplica:"no aplica"};
+function estadoCampoUI(key){
+  const c = clasificarDato(key), o = origenDe(key);
+  if(c==="valor") return {texto: o==="importado" ? "importado" : o==="estimado" ? "estimado" : "", clase: o};
+  return {texto: ESTADO_CAMPO_TXT[c], clase: c==="ejemplo" ? "demo" : c};
+}
+function pintarEstadoCampos(){
+  Object.keys(DEFAULTS).forEach(k=>{
+    const el = document.getElementById(k+"Origen"); if(!el) return;
+    const e = estadoCampoUI(k); el.textContent = e.texto; el.className = "frd-origen frd-origen-"+e.clase;
+  });
+}
+/* Campos que conservan valores de EJEMPLO (distintos de cero). */
+function camposDeEjemplo(){ return Object.keys(DEFAULTS).filter(k=>origenDe(k)==="demo" && f[k]!==0); }
 
 /* Factor para llevar un flujo del periodo a base anual: 1 si el periodo ya es
    de 12 meses (360–366 días); 365/días en otro caso. Los saldos NO se anualizan. */
@@ -1020,7 +1071,7 @@ function fuenteInventario(){
 function inventarioFinalEfectivo(){
   const k = fuenteInventario();
   if(!k) return 0;
-  return esSinDato(k) ? NaN : f[k];
+  return (esSinDato(k) || esErrorCaptura(k)) ? NaN : f[k];
 }
 /* Definición ÚNICA de compras del periodo: 1) capturadas; 2) CV + Inv. Final −
    Inv. Inicial (requiere ambos inventarios); 3) Costo de Ventas como aproximación. */
@@ -1079,11 +1130,20 @@ function depsIndicador(id){
     rotCxP: comprasK.concat(["cuentasPorPagar"]),
     capInventario: inv ? [inv,"inventarioObjetivo"] : []
   };
-  return D[id] || [];
+  const deps = D[id] || [];
+  return (USAN_PERIODO.includes(id) && deps.length) ? deps.concat([CAMPO_PERIODO]) : deps;
 }
-function faltantesDe(id){ return depsIndicador(id).filter(k=>esSinDato(k)); }
+function faltantesDe(id){ return depsIndicador(id).filter(k=>esSinDato(k) || esErrorCaptura(k)); }
 function motivoFaltantes(lista){
-  return "No interpretable: falta el dato de " + lista.map(nombreCampo).join(", ") + ". Captúralo o impórtalo para evaluar este indicador.";
+  const err = lista.filter(k=>esErrorCaptura(k)), falt = lista.filter(k=>!esErrorCaptura(k));
+  const partes = [];
+  if(falt.length) partes.push("falta el dato de " + falt.map(nombreCampo).join(", "));
+  if(err.length){
+    const campos = err.filter(k=>k!==CAMPO_PERIODO);
+    if(campos.length) partes.push("hay un error de captura en " + campos.map(nombreCampo).join(", ") + " (valor negativo no permitido)");
+    if(err.includes(CAMPO_PERIODO)) partes.push("las fechas del periodo están invertidas (la fecha de corte es anterior a la inicial)");
+  }
+  return "No interpretable: " + partes.join("; ") + ". " + (err.length ? "Corrígelo" : "Captúralo o impórtalo") + " para evaluar este indicador.";
 }
 /* Evalúa fn() solo si todas las entradas del indicador están disponibles. */
 function valorSi(id, fn){ return faltantesDe(id).length ? NaN : fn(); }
@@ -1625,7 +1685,7 @@ function getRatios() {
   const rc = valorSi("corriente", ()=> pc!==0 ? ac/pc : NaN);
   const pa = valorSi("acida", ()=> pc!==0 ? (ac-(servicios?0:inv))/pc : NaN);
   const end = valorSi("endeudamiento", ()=> at!==0 ? pt/at : NaN);
-  const dsoNoAplica = !esSinDato("ventasCredito") && !(vc>0);
+  const dsoNoAplica = !esSinDato("ventasCredito") && !esErrorCaptura("ventasCredito") && !(vc>0);
   const dso = dsoNoAplica ? NaN : valorSi("dso", ()=> vc!==0 ? (cxcParaDSO/vc)*diasP : NaN);
   const dpo = valorSi("dpo", ()=> (Number.isFinite(comprasParaDPO) && comprasParaDPO!==0) ? (cxpParaDPO/comprasParaDPO)*diasP : NaN);
   const mn = valorSi("margen", ()=> ventas!==0 ? un/ventas : NaN);
@@ -1707,6 +1767,7 @@ function overallStatus(rs) {
   let sw=0, sv=0;
   evaluadosArr.forEach(r=>{ const w=W[r.id]||1.0; sw+=w; sv+=w*NIVEL_SEVERITY[r.nivel]; });
   let nivelCalculado = null;
+  const deficit = deficitPatrimonial();
   if(sw>0){
     let avg = sv/sw;
     if(b.corriente.nivel==="pesimo" || b.acida.nivel==="pesimo") avg = Math.max(avg,3.0);
@@ -1715,12 +1776,38 @@ function overallStatus(rs) {
   const suficiente = evaluados >= Math.min(COBERTURA_MINIMA, totalAplicables) && liq && rent;
   if(!suficiente){
     const faltaTxt = [!liq ? "ningún indicador de liquidez" : null, !rent ? "ningún indicador de rentabilidad" : null].filter(Boolean).join(" ni ");
-    return {status:"gray", text:"Datos insuficientes", nivel:"sin_dato", nivelLabel:"DATOS INSUFICIENTES", evaluados, cobertura, nivelCalculado,
+    if(deficit){ deficit.aplicado = false; deficit.nivelSinTope = null; deficit.nota = notaDeficitPatrimonial(deficit); }
+    return {status:"gray", text:"Datos insuficientes", nivel:"sin_dato", nivelLabel:"DATOS INSUFICIENTES", evaluados, cobertura, nivelCalculado, deficitPatrimonial:deficit,
       motivo: `Solo ${evaluados} de ${totalAplicables} indicadores son evaluables${faltaTxt?(" y no hay "+faltaTxt):""}. Se requieren al menos ${Math.min(COBERTURA_MINIMA,totalAplicables)}, con uno de liquidez y uno de rentabilidad, para emitir un veredicto.`};
   }
-  const status = NIVEL_TO_STATUS[nivelCalculado];
+  // v3.3 (regla R-01, antes L-08): con capital contable negativo el veredicto general no puede ser mejor que REGULAR.
+  let nivel = nivelCalculado;
+  if(deficit){
+    deficit.aplicado = NIVEL_SEVERITY[nivelCalculado] < NIVEL_SEVERITY[TOPE_DEFICIT_PATRIMONIAL];
+    deficit.nivelSinTope = nivelCalculado;
+    if(deficit.aplicado) nivel = TOPE_DEFICIT_PATRIMONIAL;
+    deficit.nota = notaDeficitPatrimonial(deficit);
+  }
+  const status = NIVEL_TO_STATUS[nivel];
   const text = status==="green" ? "Saludable" : status==="yellow" ? "En observación" : "En riesgo";
-  return {status, text, nivel:nivelCalculado, nivelLabel:NIVEL_LABEL[nivelCalculado], evaluados, cobertura, nivelCalculado};
+  return {status, text, nivel, nivelLabel:NIVEL_LABEL[nivel], evaluados, cobertura, nivelCalculado, deficitPatrimonial:deficit};
+}
+/* v3.3 — REGLA R-01: DÉFICIT PATRIMONIAL (capital contable negativo).
+   Si el capital contable (capturado o, si falta, estimado como Activo Total − Pasivo Total) es menor
+   que cero, los pasivos superan a los activos. El veredicto general queda limitado a REGULAR como
+   máximo aunque la liquidez sea alta; si el promedio ya es REGULAR, MALO o PÉSIMO, no cambia.
+   Los indicadores individuales no se modifican. Capital igual a cero no activa la regla. */
+const TOPE_DEFICIT_PATRIMONIAL = "regular";
+function deficitPatrimonial(){
+  const cc = capitalContableEfectivo();
+  if(!(Number.isFinite(cc.valor) && cc.valor < 0)) return null;
+  return {regla:"R-01", capital:cc.valor, estimado:cc.estimado, nivelMaximo:TOPE_DEFICIT_PATRIMONIAL};
+}
+function notaDeficitPatrimonial(d){
+  const base = `Deterioro patrimonial: el capital contable${d.estimado?" (estimado como Activo Total − Pasivo Total)":""} es negativo (${money(d.capital)}). Los pasivos superan a los activos: aunque vendiera todos sus activos, la empresa no alcanzaría a cubrir sus deudas (quiebra técnica).`;
+  if(d.aplicado) return `${base} Por la regla de solvencia R-01, el veredicto general se limita a REGULAR, aunque el promedio de los indicadores sería ${NIVEL_LABEL[d.nivelSinTope]}.`;
+  if(d.nivelSinTope) return `${base} Por la regla de solvencia R-01, el veredicto general no puede ser mejor que REGULAR.`;
+  return `${base} Por la regla de solvencia R-01, cuando haya datos suficientes el veredicto general no podrá ser mejor que REGULAR.`;
 }
 
 /* =========================================================================
@@ -1846,7 +1933,10 @@ function getIndicadoresAmpliados(rs) {
   const ktnNivel = nivelKTNPct(ktnPctVentas);
 
   return {
-    dio: withBench("dio", dio, days(dio), metaEfectiva("dio"), nivelDIO, faltantesDe("dio")),
+    // v3.2 (D-09): en servicios sin inventario el DIO NO APLICA (antes se reportaba 0 días EXCELENTE en el CMI, el resumen y Excel).
+    dio: servicios
+      ? Object.assign(withBench("dio", NaN, "N/A", metaEfectiva("dio"), null, []), {nivel:"no_aplica", nivelLabel:NIVEL_LABEL.no_aplica, nivelIcon:NIVEL_ICON.no_aplica, display:"N/A", motivo:"Empresa de servicios sin inventario: el DIO no aplica."})
+      : withBench("dio", dio, days(dio), metaEfectiva("dio"), nivelDIO, faltantesDe("dio")),
     dioNota, cccNota,
     ccc: {id:"ccc", value:ccc, display: cccNivel==="sin_dato" ? "No interpretable" : days(ccc), benchmark:cccBench, benchmarkTexto:cccBenchTexto,
       meta:metaEfectiva("ccc"), interpretacionRegla:INTERPRETACION.ccc,
@@ -2366,12 +2456,11 @@ function renderFields() {
   const html = FIELD_GROUPS.map(g=>{
     const fields = servicios ? g.fields.filter(([key])=>!CAMPOS_INVENTARIO.includes(key)) : g.fields;
     if(!fields.length) return "";
-    const ORIGEN_TXT = {demo:"ejemplo", importado:"importado", sin_dato:"sin dato", estimado:"estimado"};
     return `
     <div class="frd-group-title">${g.title}</div>
     ${fields.map(([key,label,min,max,step])=>`
       <div class="frd-field">
-        <label for="${key}">${label} — <span id="${key}Money">${esSinDato(key)?"sin dato":money(f[key])}</span> <span id="${key}Origen" class="frd-origen frd-origen-${origenDe(key)}">${ORIGEN_TXT[origenDe(key)]||""}</span></label>
+        <label for="${key}">${label} — <span id="${key}Money">${esSinDato(key)?"sin dato":money(f[key])}</span> <span id="${key}Origen" class="frd-origen frd-origen-${estadoCampoUI(key).clase}">${estadoCampoUI(key).texto}</span></label>
         <div class="frd-field-row">
           <input type="range" id="${key}Range" min="${min}" max="${Math.max(max,f[key])}" step="${step}" value="${f[key]}" oninput="updateField('${key}',this.value)">
           <input type="number" id="${key}" step="${step}" value="${esSinDato(key)?"":f[key]}" placeholder="sin dato" oninput="updateField('${key}',this.value)">
@@ -2426,7 +2515,7 @@ function updateField(key,value) {
   if(num && document.activeElement!==num) num.value= vacio ? "" : v;
   if(range) { if(v > parseFloat(range.max)) range.max = v; if(v < parseFloat(range.min)) range.min = v; range.value=v; }
   const m = document.getElementById(key+"Money"); if(m) m.textContent= vacio ? "sin dato" : money(v);
-  const o = document.getElementById(key+"Origen"); if(o){ o.textContent = vacio ? "sin dato" : ""; o.className = "frd-origen frd-origen-"+origenDe(key); }
+  const o = document.getElementById(key+"Origen"); if(o){ const e = estadoCampoUI(key); o.textContent = e.texto; o.className = "frd-origen frd-origen-"+e.clase; }
   programarCalculo();
 }
 /* B3: el slider dispara decenas de eventos por segundo; se recalcula una sola
@@ -2461,7 +2550,9 @@ function renderPeriodoUI(){
   if(ff) ff.value = f.fechaFin || "";
   const info = document.getElementById("periodoDiasInfo");
   if(info){
-    if(f.periodoDiasEsEstimado){
+    if(periodoInvalido()){
+      info.textContent = `⚠ Fechas no válidas: la fecha de corte es anterior a la fecha inicial. Los indicadores que usan días del periodo quedan como no interpretables hasta corregirlas.`;
+    } else if(f.periodoDiasEsEstimado){
       info.textContent = `Días del periodo: ${f.periodoDias} (valor por defecto — captura ambas fechas para un cálculo exacto).`;
     } else {
       const fmt = iso => { const [y,m,d]=iso.split("-"); return `${d}/${m}/${y}`; };
@@ -2559,6 +2650,9 @@ function diagnosis(rs, o, combined, ranking, top5, ext, mes) {
     lines.push(`<strong>Situación general:</strong> la empresa presenta una situación financiera en nivel <strong>${o.nivelLabel}</strong>: todos los indicadores evaluables están en nivel EXCELENTE; el reto es sostenerlos.`);
   } else {
     lines.push(`<strong>Situación general:</strong> la empresa presenta una situación financiera en nivel <strong>${o.nivelLabel}</strong>. El principal punto de atención se concentra en <strong>${peor.indicador}</strong>, actualmente en nivel ${NIVEL_ICON[peor.nivel]} ${peor.nivelLabel} (${peor.valor}), con una desviación de ${peor.desviacion} respecto a la meta.`);
+  }
+  if(o.deficitPatrimonial){
+    lines.push(`<strong>⚠ Deterioro patrimonial (regla R-01):</strong> ${esc(o.deficitPatrimonial.nota.replace(/^Deterioro patrimonial: /,""))} Revisa el endeudamiento y el ROE antes de concluir: los demás indicadores se calculan igual, pero no compensan el déficit patrimonial.`);
   }
   if(noInterp.length){
     lines.push(`<strong>Indicadores no interpretables:</strong> ${noInterp.map(r=>r.name+" — "+r.motivo).join(" ")} Estos indicadores no se califican ni influyen en la situación general.`);
@@ -2961,7 +3055,9 @@ function sanearEstado(d){
   Object.keys(DEFAULTS).forEach(k=>{ e[k] = numOk(d[k], 0); });
   const o = d.origen && typeof d.origen==="object" ? d.origen : {};
   // Igual que v2: un campo sin origen registrado se considera valor de ejemplo.
-  Object.keys(DEFAULTS).forEach(k=>{ e.origen[k] = ORIGENES.includes(o[k]) ? o[k] : "demo"; });
+  // v3.2: si el valor no existe en el archivo, el campo es "sin dato" (antes quedaba en 0 con origen de ejemplo
+  // y se calculaba como cero real; p. ej. DPO = 0 días PÉSIMO).
+  Object.keys(DEFAULTS).forEach(k=>{ e.origen[k] = !Number.isFinite(numOk(d[k], NaN)) ? "sin_dato" : (ORIGENES.includes(o[k]) ? o[k] : "demo"); });
   e.empresaNombre = sanearTexto(d.empresaNombre, 120);
   e.periodo = sanearTexto(d.periodo, 80);
   const sec = SECTORES.find(s=>s.toLowerCase()===String(d.sector||"").toLowerCase());
@@ -2994,6 +3090,15 @@ function sanearRegistro(h){
   if(h.ind && typeof h.ind==="object"){
     r.ind = {};
     IDS_RESUMEN.forEach(id=>{ const x = h.ind[id]; if(x && typeof x==="object") r.ind[id] = {valor:Number.isFinite(x.valor)?x.valor:null, nivel:(NIVELES.includes(x.nivel)||x.nivel==="no_aplica"||x.nivel==="sin_dato")?x.nivel:"sin_dato"}; });
+  }
+  if(h.veredicto && typeof h.veredicto==="object"){
+    const v = h.veredicto, okNivel = x => NIVELES.includes(x) || x==="sin_dato";
+    if(okNivel(v.nivel)){
+      const d = v.deficitPatrimonial;
+      r.veredicto = {nivel:v.nivel, nivelCalculado: okNivel(v.nivelCalculado) ? v.nivelCalculado : null, evaluados: Number.isFinite(v.evaluados) ? v.evaluados : null,
+        versionSistema: sanearTexto(v.versionSistema, 12),
+        deficitPatrimonial: (d && typeof d==="object" && Number.isFinite(d.capital)) ? {regla:"R-01", capital:d.capital, estimado:!!d.estimado, aplicado:!!d.aplicado} : null};
+    }
   }
   if(h.montos && typeof h.montos==="object"){ r.montos = {}; Object.keys(DEFAULTS).forEach(k=>{ if(Number.isFinite(h.montos[k])) r.montos[k] = h.montos[k]; }); }
   return r;
@@ -3157,8 +3262,22 @@ async function descartarHuerfanos(){
   if(!await confirmar("Se descartarán los registros sin empresa. Las claves originales de la versión anterior siguen intactas en este navegador.", {si:"Descartar", peligro:true})) return;
   WS.sinAsignar = {historial:[], plan:{}}; renderWorkspaceUI(); guardarEstado();
 }
+/* v3.2: los datos de EJEMPLO no entran al historial ni a los periodos guardados. */
+async function bloquearSiNoOperativo(accion){
+  const demo = camposDeEjemplo();
+  if(demo.length){
+    await avisar(`No se puede ${accion} con datos de EJEMPLO: ${demo.length} campo(s) conservan valores ficticios del sistema (${demo.map(nombreCampo).join(", ")}). Captura o importa los datos reales de la empresa, o vacía esos campos para marcarlos como “sin dato”.`);
+    return true;
+  }
+  if(periodoInvalido()){
+    await avisar(`No se puede ${accion}: la fecha de corte es anterior a la fecha inicial del periodo. Corrige las fechas.`);
+    return true;
+  }
+  return false;
+}
 async function guardarPeriodoActual(){
   calcularAhora();
+  if(await bloquearSiNoOperativo("guardar el periodo")) return;
   const emp = empresaActiva();
   const sugerida = f.periodo || `${f.fechaInicio||"?"} a ${f.fechaFin||"?"}`;
   const etiqueta = await pedirTexto("Etiqueta del periodo (por ejemplo “Cierre septiembre 2026”).", sugerida, "Guardar periodo");
@@ -3328,13 +3447,14 @@ async function addHistorialEntry(){
   if(!RE_MES.test(mes||"")){ await avisar("Selecciona el mes que quieres registrar."); return; }
   const hoyMes = fmtFechaISO(new Date()).slice(0,7);
   if(mes > hoyMes){ await avisar(`No se pueden registrar meses futuros (${mes}). El mes más reciente permitido es ${hoyMes}.`); return; }
+  if(await bloquearSiNoOperativo("registrar el seguimiento")) return;
   const emp = empresaActiva();
   if(emp.historial.some(h=>h.mes===mes) && !await confirmar(`Ya existe un registro de ${mes} para esta empresa. ¿Deseas reemplazarlo con los valores actuales?`, {si:"Reemplazar"})) return;
   if(!(f.periodoDias>=28 && f.periodoDias<=31) && !await confirmar(`El periodo capturado es de ${f.periodoDias} días, no de un mes. DSO y DPO se calcularon con ${f.periodoDias} días y el ROA se guarda anualizado. ¿Registrar de todos modos como ${mes}?`, {si:"Registrar"})) return;
   const R = evaluarEstadoActual();
   const I = R.indicadores;
   const entry = {mes, rc:I.corriente.valor, pa:I.acida.valor, end:I.endeudamiento.valor, dso:I.dso.valor, dpo:I.dpo.valor, mn:I.margen.valor,
-    roa:I.roa.valor, ind:I, datos:structuredClone(f), periodoDias:f.periodoDias, sector:f.sector, subsector:f.subsector,
+    roa:I.roa.valor, ind:I, veredicto:veredictoRegistro(R.o), datos:structuredClone(f), periodoDias:f.periodoDias, sector:f.sector, subsector:f.subsector,
     registrado:ahoraISO(), esquema:ESQUEMA_VERSION, base:"v3"};
   emp.historial = emp.historial.filter(h=>h.mes!==mes);
   emp.historial.push(entry);
@@ -3442,6 +3562,13 @@ function trendChartsGridHTML(hist){
   return `<div class="frd-trend-grid">${TREND_INDICATORS.map(([k,n,h,f])=>trendChartHTML(hist,k,n,h,f)).join("")}</div>`;
 }
 
+/* v3.3: el registro guarda el veredicto general tal como lo emite el motor, con la regla R-01 ya aplicada,
+   para que el historial (y la Fase 2) no recalcule un veredicto distinto al del diagnóstico. */
+function veredictoRegistro(o){
+  const d = o.deficitPatrimonial;
+  return {nivel:o.nivel, nivelCalculado:o.nivelCalculado||null, evaluados:o.evaluados, versionSistema:VERSION_SISTEMA,
+    deficitPatrimonial: d ? {regla:"R-01", capital:d.capital, estimado:!!d.estimado, aplicado:!!d.aplicado} : null};
+}
 function renderHistorial(rs){
   const sorted = [...historial].sort((a,b)=>a.mes.localeCompare(b.mes));
   const rows = sorted.map(h=>`
@@ -3964,7 +4091,6 @@ function migrarMetasV2(d){
 /* =========================================================================
    A7 — VALIDACIÓN CONTABLE (avisos, no bloqueos)
 ========================================================================= */
-const CAMPOS_PUEDEN_SER_NEGATIVOS = ["utilidadNeta","utilidadBruta","capitalContable"];
 function validarDatos(){
   const av = [];
   const tol = v => Math.max(1, Math.abs(v)*0.01);
@@ -3989,8 +4115,25 @@ function validarDatos(){
     av.push(`“Inventarios (actual)” (${money(f.inventarios)}) y “Inventario Final” (${money(f.inventarioFinal)}) difieren; se usa el Inventario Final en todos los cálculos (prueba ácida, DIO, rotación de inventario y capital liberable).`);
   if(isServicios() && f.inventarios>0 && esDatoReal("inventarios"))
     av.push(`Subsector de servicios sin inventario: el inventario capturado (${money(f.inventarios)}) se excluye del cálculo. Verifique que el Activo Circulante no lo incluya, o elija un subsector que sí maneje inventario.`);
-  Object.keys(DEFAULTS).forEach(k=>{ if(f[k]<0 && !CAMPOS_PUEDEN_SER_NEGATIVOS.includes(k)) av.push(`${L(k)} es negativo (${money(f[k])}); este dato no debería ser menor que cero.`); });
+  Object.keys(DEFAULTS).forEach(k=>{ if(f[k]<0 && !CAMPOS_PUEDEN_SER_NEGATIVOS.includes(k)) av.push(`Error de captura: ${L(k)} es negativo (${money(f[k])}) y este dato no puede ser menor que cero. Los indicadores que dependen de él quedan como no interpretables hasta corregirlo.`); });
   const ci = comprasDelPeriodo(); if(ci.aviso) av.push(ci.aviso);
+  // v3.2: periodos incompatibles y casos límite adicionales.
+  if(periodoInvalido()){
+    const fmt = iso => { const [y,m,d]=String(iso).split("-"); return `${d}/${m}/${y}`; };
+    av.push(`Error de captura: la fecha de corte (${fmt(f.fechaFin)}) es anterior a la fecha inicial (${fmt(f.fechaInicio)}). Los indicadores que usan los días del periodo (DSO, DPO, DIO, CCC, ROA, ROE, rotaciones y capital de trabajo ÷ ventas) quedan como no interpretables hasta corregirla.`);
+  } else if(f.periodoDias>366){
+    av.push(`El periodo abarca ${f.periodoDias} días (más de un año). Verifica las fechas: DSO, DPO y DIO se calculan con esos días y ROA/ROE se ajustan a base anual.`);
+  }
+  if(f.fechaFin && f.fechaFin > fmtFechaISO(new Date()) && !periodoInvalido()) av.push(`La fecha de corte (${f.fechaFin}) es posterior a hoy: los saldos aún no pueden estar cerrados a esa fecha.`);
+  const real = k => !esSinDato(k) && !esErrorCaptura(k);
+  if(real("utilidadNeta") && real("ventas") && f.ventas>0 && f.utilidadNeta > f.ventas*1.0001)
+    av.push(`La Utilidad Neta (${money(f.utilidadNeta)}) es mayor que las Ventas (${money(f.ventas)}): revisa si incluye otros ingresos extraordinarios o si hay un error de captura.`);
+  if(real("costoVentas") && real("ventas") && f.ventas>0 && f.costoVentas > f.ventas*1.0001)
+    av.push(`El Costo de Ventas (${money(f.costoVentas)}) es mayor que las Ventas (${money(f.ventas)}): el margen bruto es negativo. Verifica la captura.`);
+  if(real("cuentasPorPagar") && real("pasivoCirculante") && pc>0 && f.cuentasPorPagar > pc*1.0001)
+    av.push(`Las Cuentas por Pagar (${money(f.cuentasPorPagar)}) son mayores que el Pasivo Circulante (${money(pc)}).`);
+  if(real("ventasCredito") && f.ventasCredito>0 && real("cuentasPorCobrar") && f.cuentasPorCobrar===0 && !(f.cxcOriginadaPeriodo>0))
+    av.push(`Hay Ventas a Crédito (${money(f.ventasCredito)}) pero las Cuentas por Cobrar son cero: el DSO resulta de 0 días. Es correcto solo si toda la cartera ya se cobró; si no, captura el saldo.`);
   const reales = Object.keys(DEFAULTS).filter(k=>esDatoReal(k));
   const demo = Object.keys(DEFAULTS).filter(k=>origenDe(k)==="demo" && f[k]!==0);
   if(reales.length && demo.length) av.push(`Hay ${demo.length} campo(s) con valores de EJEMPLO mezclados con tus datos: ${demo.map(L).join(", ")}. Captúralos o vacíalos para marcarlos como “sin dato”.`);
@@ -4033,7 +4176,7 @@ function descargarArchivo(nombre, contenido, tipo){
 const TIPO_RESPALDO = "respaldo-sistema-diagnostico-financiero";
 function exportarRespaldo(){
   calcularAhora(); guardarEstado();
-  const datos = {tipo:TIPO_RESPALDO, esquema:ESQUEMA_VERSION, exportado:ahoraISO(), workspace:WS};
+  const datos = {tipo:TIPO_RESPALDO, esquema:ESQUEMA_VERSION, version:VERSION_SISTEMA, exportado:ahoraISO(), workspace:WS};
   descargarArchivo("Respaldo_Diagnostico_Financiero_"+fmtFechaISO(new Date())+".json", JSON.stringify(datos,null,2), "application/json");
 }
 /* Importa respaldos v3 (todo el espacio de trabajo) y v2 (una empresa con su
@@ -4179,6 +4322,7 @@ function renderMetodologia(){
     <p><strong>Metas (versión 3):</strong> todas las metas viven en un solo catálogo (pestaña Metas). La meta es el límite de BUENO y las demás bandas se fijan por distancia a la meta, por lo que una meta propia —incluso negativa— desplaza todo el semáforo de ese indicador sin deformarlo. Con las metas estándar los umbrales son exactamente los de versiones anteriores, excepto la meta estándar del CCC, que pasa de 45 a 60 días para coincidir con el límite de su banda BUENO.</p>
     <p><strong>Datos faltantes (versión 3):</strong> cada indicador declara todas sus entradas. Si cualquiera está “sin dato”, el indicador es NO INTERPRETABLE aunque el dato faltante esté en el numerador (antes, un dato vacío se tomaba como cero y podía producir, por ejemplo, un DPO de 0 días calificado como PÉSIMO).</p>
     <p><strong>Veredicto general:</strong> se emite solo con al menos ${COBERTURA_MINIMA} indicadores evaluables (o todos los aplicables si son menos), incluyendo uno de liquidez y uno de rentabilidad; si no, aparece “DATOS INSUFICIENTES”. El sello muestra cuántos indicadores sustentan el veredicto.</p>
+    <p id="reglaR01"><strong>Regla de solvencia R-01 (déficit patrimonial):</strong> si el capital contable es negativo (pasivos mayores que activos), el veredicto general no puede ser mejor que REGULAR, aunque la liquidez sea alta. Se usa el capital contable capturado o, si no se capturó, Activo Total − Pasivo Total. Si el promedio ya es REGULAR, MALO o PÉSIMO, no cambia. Los indicadores individuales se calculan igual (el endeudamiento aparece PÉSIMO y el ROE como no interpretable) y se emite una alerta de deterioro patrimonial. La regla es la misma en el diagnóstico, el sello, el resultado final, los escenarios, el Dashboard Ejecutivo, el reporte impreso, el Excel y el historial (cada registro guarda su veredicto). Un capital contable igual a cero no activa la regla.</p>
     <p><strong>Privacidad:</strong> todos los datos (empresas, periodos, historial, plan y escenarios) se guardan solo en este navegador (localStorage). Nada se envía a un servidor; las librerías externas (Excel, PDF y OCR) procesan los archivos localmente. Usa “Respaldo completo (JSON)” para llevar tus datos a otro equipo.</p>
     <p><strong>Benchmarks Damodaran (versión 3):</strong> todas las filas se recalcularon con una sola fórmula a partir de las tablas de enero 2026 (DSO = CxC÷Ventas×365; DIO y DPO = Inventario o CxP ÷ Ventas × 365 ÷ (1 − margen bruto)); cada referencia muestra la industria comparable usada. Industria comparable del sector/subsector seleccionado: ${esc((getBenchmark("dso")||{}).industria || "sin referencia")}.</p>
     <p><strong>Librerías externas:</strong> ${(()=>{ const L = estadoLibrerias(); return `Excel: ${esc(L.excel)} · PDF: ${esc(L.pdf)} · OCR: ${esc(L.ocr)}`; })()}.</p>
@@ -4243,6 +4387,31 @@ function ejecutarAutodiagnostico(){
     ok("Escenario: DSO objetivo 30 días se refleja en el motor", Math.abs(Re.rs.find(r=>r.id==="dso").value - 30) < 1e-6);
     // 9) El motor no altera el estado activo.
     ok("Motor.evaluar no modifica los datos en pantalla", JSON.stringify(f)===JSON.stringify(respaldo));
+    // 10) v3.2 — Pruebas de referencia con resultado matemáticamente conocido.
+    const ref = Motor.evaluar({activoCirculante:100000, pasivoCirculante:50000, inventarios:20000, activosTotales:100000, pasivosTotales:60000,
+      ventas:100000, utilidadNeta:10000, costoVentas:60000, ventasCredito:48000, cuentasPorCobrar:5000, cuentasPorPagar:6000,
+      fechaInicio:"2024-01-01", fechaFin:"2024-12-31", periodoDias:366});
+    const I = ref.indicadores;
+    ok("Referencia: razón corriente 100,000 ÷ 50,000 = 2.00", Math.abs(I.corriente.valor-2) < 1e-12);
+    ok("Referencia: prueba ácida (100,000 − 20,000) ÷ 50,000 = 1.60", Math.abs(I.acida.valor-1.6) < 1e-12);
+    ok("Referencia: endeudamiento 60,000 ÷ 100,000 = 60 %", Math.abs(I.endeudamiento.valor-0.6) < 1e-12);
+    ok("Referencia: margen neto 10,000 ÷ 100,000 = 10 %", Math.abs(I.margen.valor-0.1) < 1e-12);
+    ok("Referencia: DSO 5,000 ÷ 48,000 × 366 = 38.125 días", Math.abs(I.dso.valor-38.125) < 1e-9, I.dso.valor);
+    const pc0 = Motor.evaluar({activoCirculante:100000, pasivoCirculante:0}).rs.find(r=>r.id==="corriente");
+    ok("Referencia: pasivo circulante 0 → razón corriente controlada (no infinito)", pc0.nivel==="sin_dato" && !Number.isFinite(pc0.value) && pc0.display==="No interpretable");
+    const aus = Motor.evaluar({ventas:500000, costoVentas:300000, utilidadNeta:50000}).indicadores;
+    ok("Un campo ausente nunca toma el valor de ejemplo", aus.corriente.nivel==="sin_dato" && aus.corriente.valor===null);
+    // 11) v3.3 — Regla de solvencia R-01 (capital contable negativo).
+    const r01 = {activoCirculante:300000, pasivoCirculante:100000, inventarios:20000, activosTotales:400000, pasivosTotales:500000, capitalContable:-100000,
+      ventas:1000000, costoVentas:600000, utilidadNeta:150000, ventasCredito:365000, cuentasPorCobrar:30000, cuentasPorPagar:6000, compras:44000,
+      fechaInicio:"2025-01-01", fechaFin:"2025-12-31"};
+    const Rn = Motor.evaluar(r01), Rp = Motor.evaluar(Object.assign({}, r01, {capitalContable:100000, pasivosTotales:300000}));
+    ok("R-01: capital contable negativo con liquidez alta → veredicto REGULAR (el promedio sería BUENO); los indicadores no cambian",
+      Rn.o.nivel==="regular" && Rn.o.nivelCalculado==="bueno" && Rn.o.deficitPatrimonial.aplicado && Rn.indicadores.corriente.nivel==="excelente" && Math.abs(Rn.indicadores.corriente.valor-3)<1e-12 && Rn.indicadores.endeudamiento.nivel==="pesimo",
+      `${Rn.o.nivel} (promedio ${Rn.o.nivelCalculado})`);
+    ok("R-01: alerta de deterioro patrimonial, mismo veredicto en el registro del historial y sin tope con capital positivo",
+      Rn.alerts[0] && Rn.alerts[0].regla==="R-01" && veredictoRegistro(Rn.o).nivel===Rn.o.nivel && veredictoRegistro(Rn.o).deficitPatrimonial.aplicado && Rp.o.nivel==="bueno" && !Rp.o.deficitPatrimonial,
+      `capital positivo: ${Rp.o.nivel}`);
   }catch(err){ ok("Error inesperado durante el autodiagnóstico", false, String(err && err.message || err)); }
   finally{ f = respaldo; const emp = empresaActiva(); if(emp) emp.estado = f; }
   const fallas = pruebas.filter(p=>!p.ok).length;
@@ -4251,6 +4420,8 @@ function ejecutarAutodiagnostico(){
   return {total:pruebas.length, fallas, pruebas};
 }
 const NOTAS_VERSION_3 = [
+  ["Versión 3.3 (cierre de la Fase 1: regla de solvencia R-01)", "Con capital contable negativo (pasivos mayores que activos), el veredicto general queda limitado a REGULAR como máximo aunque la liquidez sea alta; los indicadores individuales no cambian. Nueva alerta de deterioro patrimonial y la misma regla en diagnóstico, sello, resultado final, escenarios, Dashboard Ejecutivo, reporte impreso, Excel e historial (cada registro guarda su veredicto). Resuelve la limitación L-08."],
+  ["Versión 3.2 (Fase 1: estabilización y auditoría)", "Los datos de ejemplo ya no entran al motor cuando falta un campo ni a respaldos sin origen (un campo ausente es “sin dato”); el historial y los periodos guardados rechazan datos de ejemplo; fechas del periodo invertidas son error de captura y vuelven no interpretables los indicadores que usan días; un importe negativo no permitido es error de captura; nuevos avisos (utilidad mayor que ventas, costo mayor que ventas, CxP mayor que el pasivo circulante, ventas a crédito sin cartera, periodo de más de un año, fecha de corte futura); cada campo muestra si es cero real, sin dato, no aplica, ejemplo o error; pruebas de referencia en el autodiagnóstico; identificador de versión visible y en los respaldos."],
   ["Versión 3.1 (auditoría con datos reales)", "Complemento mensual derivado de dos acumulados del mismo ejercicio (Diagnóstico, Alertas, Seguimiento y ritmo de Pronósticos) sin cambiar el análisis principal sobre el acumulado; conciliación entre periodos (compras implícitas negativas y cambios de capital no explicados por la utilidad); benchmarks con su unidad y nota informativa cuando la industria opera muy distinto, respetando la meta definida por el usuario; acciones de DIO y CCC solo cuando están fuera de su meta; diagnóstico y Top 5 alineados; acciones del CMI según el indicador que causa el nivel y CCC en Capital de Trabajo; efectivo liberable separado del financiamiento de proveedores; aviso de liquidez muy holgada; misma comparación en alertas y gráficas; escenarios que conservan el DIO sin palanca e indican su periodo base; Aprendizaje con meses cerrados; meses futuros rechazados."],
   ["Datos faltantes", "Un indicador con cualquier entrada “sin dato” es NO INTERPRETABLE (antes un dato vacío en el numerador valía cero y podía calificarse PÉSIMO y generar acciones)."],
   ["Veredicto con cobertura", "La situación general exige al menos 5 indicadores evaluables con liquidez y rentabilidad; el sello muestra en cuántos se basa."],
@@ -4263,7 +4434,21 @@ const NOTAS_VERSION_3 = [
   ["Seguridad", "Respaldos saneados antes de usarse y todo texto externo escapado (cierra la inyección de HTML por subsector o mes); diálogos propios en lugar de confirm/alert; pdf.js 6.2.108 con Subresource Integrity."],
   ["Otros", "DPO bajo ya no se trata como atraso con proveedores; plantillas de acciones para comercio y servicios con inventario; prueba ácida y DIO usan el mismo inventario; KTN ÷ ventas y ROA de las reglas combinadas anualizados; aviso de datos de ejemplo o incompletos en pantalla, PDF, Excel y Dashboard; CV “no interpretable” en lugar de NaN; pestañas accesibles con teclado; benchmarks Damodaran recalculados con una sola fórmula."]
 ];
+/* v3.2 — Limitaciones conocidas (mismo contenido que docs/fase1/04_registro_defectos.md, sección "Pendientes"). */
+const LIMITACIONES_CONOCIDAS = [
+  ["L-01 · ROA y ROE con saldos al cierre", "Se calculan con activos y capital al cierre del periodo, no con saldos promedio. En empresas que crecen o decrecen mucho durante el periodo el resultado puede diferir del calculado con promedios."],
+  ["L-02 · Librerías sin verificación de integridad", "SheetJS (Excel) y Tesseract.js (lectura de imágenes) se cargan sin hash de integridad (SRI); pdf.js sí lo tiene. Todo el procesamiento ocurre en este navegador."],
+  ["L-03 · Meta del DPO fija", "El DPO se califica con el rango fijo de 45 a 60 días y no se puede cambiar en la pestaña Metas; el financiamiento por DPO del capital liberable usa 45 días."],
+  ["L-04 · Lectura de imágenes (OCR) sin prueba automática", "La extracción de importes desde fotografías depende de la calidad de la imagen y no tiene prueba automática. La revisión antes de aplicar es obligatoria: verifica cada importe."],
+  ["L-05 · Importación probada con documentos sintéticos", "Las pruebas de importación usan estados financieros de prueba; aún no se valida con un corpus de estados reales de MiPyMES."],
+  ["L-06 · Laboratorio estadístico", "Las funciones estadísticas se validaron contra SciPy/NumPy, pero no todas tienen prueba automática en cada versión."],
+  ["L-07 · Rotación de cuentas por cobrar", "La rotación de CxC usa ventas totales (convención DuPont) y el DSO usa ventas a crédito; por eso 365 ÷ rotación no coincide con el DSO cuando hay ventas al contado."],
+  ["L-09 · Benchmarks aproximados", "Algunos subsectores usan una industria comparable de Damodaran como aproximación. Los benchmarks nunca cambian el semáforo."],
+  ["L-10 · Datos solo en este navegador", "Borrar los datos del navegador elimina empresas, periodos e historial. Exporta un respaldo con regularidad (pestaña Exportar). La recuperación automática y el control de versiones corresponden a la Fase 2."]
+];
 function renderNotasVersion(){
+  const lim = document.getElementById("limitacionesBox");
+  if(lim && !lim.dataset.listo){ lim.dataset.listo = "1"; lim.innerHTML = LIMITACIONES_CONOCIDAS.map(([t,d])=>`<p><strong>${esc(t)}:</strong> ${esc(d)}</p>`).join(""); }
   const el = document.getElementById("notasVersionBox");
   if(el && !el.dataset.listo){ el.dataset.listo = "1"; el.innerHTML = NOTAS_VERSION_3.map(([t,d])=>`<p><strong>${esc(t)}:</strong> ${esc(d)}</p>`).join(""); }
 }
@@ -4274,6 +4459,7 @@ function renderResultadoFinal(rs,o,ranking,top5,ext,cards){
   const cmiLine = cards.map(c=>c.title+": "+NIVEL_ICON[c.nivel]+" "+NIVEL_LABEL[c.nivel]).join(" · ");
   document.getElementById("resultadoFinalBox").innerHTML = `
     <p><strong>Situación general:</strong> ${o.nivelLabel} — ${esc(o.cobertura.texto)}.${o.nivel==="sin_dato" ? " "+esc(o.motivo||"") : ""}</p>
+    ${o.deficitPatrimonial ? `<p><strong>⚠ Regla de solvencia R-01:</strong> ${esc(o.deficitPatrimonial.nota)}</p>` : ""}
     <p><strong>Principales fortalezas:</strong> ${fortalezas.length? fortalezas.map(r=>r.name+" ("+r.display+", "+r.nivelLabel+")").join(" · ") : "Ninguna en nivel BUENO o EXCELENTE todavía."}</p>
     <p><strong>Principales áreas de atención:</strong> ${atencion.length? atencion.map(r=>r.name+" ("+r.display+", "+r.nivelLabel+")").join(" · ") : "Ninguna: todos los indicadores están en BUENO o EXCELENTE."}</p>
     <p><strong>Diagnóstico del Capital de Trabajo:</strong> ${diagnosticoCapitalTrabajo(rs,ext)[0]} ${diagnosticoCapitalTrabajo(rs,ext).slice(1).join(" ")}</p>
@@ -4303,6 +4489,8 @@ function evaluarEstadoActual(){
   const ranking = rankProblems(rs);
   const top5 = top5Acciones(recos);
   const alerts = buildAlertas(rs);
+  // v3.3 (R-01): alerta específica de deterioro patrimonial, siempre al inicio.
+  if(o.deficitPatrimonial) alerts.unshift({icon:"🔴", nivel:"pesimo", regla:"R-01", text:o.deficitPatrimonial.nota});
   // Complemento mensual (derivado de dos acumulados consecutivos) y conciliación entre periodos.
   let mes = null; try{ mes = mesDerivado(f); }catch(e){ mes = null; }
   if(mes && Number.isFinite(mes.un) && mes.un<0) alerts.unshift({icon:"🔴", nivel:"malo", text:`${mes.etiqueta} (derivado del acumulado): pérdida neta de ${money(mes.un)} con margen de ${percent(mes.mn)}, aunque el acumulado muestra ${percent(f.utilidadNeta/f.ventas)}.`});
@@ -4325,13 +4513,17 @@ function resumenIndicadores(rs, ext){
     dio:[ext.dio.value,ext.dio.nivel], ccc:[ext.ccc.value,ext.ccc.nivel], roe:[ext.roe.value,ext.roe.nivel||"sin_dato"],
     margenBruto:[ext.margenBruto.value,ext.margenBruto.nivel], ktnPct:[ext.ktn.pctVentas,ext.ktn.nivel]
   };
-  return Object.fromEntries(Object.entries(x).map(([k,[v,n]])=>[k,{valor:Number.isFinite(v)?v:null, nivel:n}]));
+  // v3.2 (D-10): un indicador no interpretable o que no aplica no lleva valor (antes el ROE con capital contable
+  // negativo guardaba +80 % en el resumen y el historial aunque estuviera marcado como no interpretable).
+  return Object.fromEntries(Object.entries(x).map(([k,[v,n]])=>[k,{valor:(Number.isFinite(v) && !noEvaluable(n)) ? v : null, nivel:n}]));
 }
 function datosNormalizados(d){
-  const base = {...DEFAULTS, empresaNombre:"", periodo:"", sector:"manufactura", subsector:"", periodoDias:365, metas:{}};
+  // v3.2: la base ya NO toma los valores de ejemplo (DEFAULTS); un campo ausente queda "sin dato".
+  const base = {empresaNombre:"", periodo:"", sector:"manufactura", subsector:"", metas:{}};
   const out = Object.assign(base, structuredClone(d||{}));
   out.origen = Object.assign(Object.fromEntries(Object.keys(DEFAULTS).map(k=>[k,"capturado"])), (d&&d.origen)||{});
-  Object.keys(DEFAULTS).forEach(k=>{ if(!Number.isFinite(out[k])) { out[k] = 0; if(!(d&&d.origen&&d.origen[k])) out.origen[k] = "sin_dato"; } });
+  Object.keys(DEFAULTS).forEach(k=>{ if(!Number.isFinite(out[k])) { out[k] = 0; out.origen[k] = "sin_dato"; } });
+  if(!Number.isFinite(out.periodoDias)){ const dd = diasEntreFechas(out.fechaInicio, out.fechaFin); out.periodoDias = dd || 365; }
   if(!out.metas || typeof out.metas!=="object") out.metas = {};
   return out;
 }
@@ -4365,12 +4557,13 @@ function calculate() {
   lastResultado = R;
   const {rs, o, combined, capital, recos, ranking, top5, alerts, ext, cards, priority} = R;
   renderValidacion(R.validacion);
+  pintarEstadoCampos();
 
   const stamp = document.getElementById("stamp");
   stamp.className = "frd-stamp " + o.nivel;
-  stamp.title = o.nivel==="sin_dato" ? (o.motivo||"") : o.cobertura.texto;
+  stamp.title = (o.nivel==="sin_dato" ? (o.motivo||"") : o.cobertura.texto) + (o.deficitPatrimonial ? "\n" + o.deficitPatrimonial.nota : "");
   document.getElementById("stampVerdict").textContent = o.nivelLabel;
-  document.getElementById("stampCobertura").textContent = o.cobertura.texto.replace("Basado en ","").replace(" indicadores aplicables"," indicadores evaluados");
+  document.getElementById("stampCobertura").textContent = o.cobertura.texto.replace("Basado en ","").replace(" indicadores aplicables"," indicadores evaluados") + (o.deficitPatrimonial && o.deficitPatrimonial.aplicado ? " · tope R-01: capital negativo" : "");
   const aviso = avisoDatosHTML(R); lastAviso = aviso;
   const av = document.getElementById("avisoDatos"); av.className = "frd-aviso-datos " + aviso.clase; av.innerHTML = aviso.html;
 
@@ -4637,7 +4830,7 @@ function renderEscenarios(Rbase){
   const base = R0.indicadores;
   const filaMonto = (t, get) => `<tr><td>${t}</td>${cols.map(c=>{ const v = get(c); return `<td class="num">${Number.isFinite(v)?money(v):"—"}</td>`; }).join("")}</tr>`;
   cont.innerHTML = `<div class="frd-table-wrap"><table class="frd-table"><thead><tr><th>Indicador</th>${cols.map(c=>`<th>${esc(c.nombre)}${c.sub?`<div style="font-weight:400;font-size:10px;text-transform:none;letter-spacing:0;">${esc(c.sub)}</div>`:""}</th>`).join("")}</tr></thead><tbody>
-    <tr><td><strong>Situación general</strong></td>${cols.map(c=>`<td><span class="frd-status-pill ${c.R.o.nivel}">${NIVEL_ICON[c.R.o.nivel]} ${c.R.o.nivelLabel}</span><div style="font-size:10px;color:var(--text-muted);">${esc(c.R.o.cobertura.texto)}</div></td>`).join("")}</tr>
+    <tr><td><strong>Situación general</strong></td>${cols.map(c=>`<td><span class="frd-status-pill ${c.R.o.nivel}">${NIVEL_ICON[c.R.o.nivel]} ${c.R.o.nivelLabel}</span><div style="font-size:10px;color:var(--text-muted);">${esc(c.R.o.cobertura.texto)}</div>${c.R.o.deficitPatrimonial ? `<div class="tope-r01" style="font-size:10px;font-weight:700;color:var(--red);" title="${esc(c.R.o.deficitPatrimonial.nota)}">⚠ Capital contable negativo: máximo REGULAR (R-01)</div>` : ""}</td>`).join("")}</tr>
     ${FILAS_COMPARACION.map(([id,t])=>`<tr><td>${t}</td>${cols.map((c,i)=>celdaIndicador(id, c.R.indicadores[id], i===0?null:base[id])).join("")}</tr>`).join("")}
     ${filaMonto("Ventas", c=>c.datos.ventas)}
     ${filaMonto("Utilidad neta", c=>c.datos.utilidadNeta)}
@@ -5647,6 +5840,7 @@ function printWithMode(bodyClass, statusMsg) {
   document.getElementById("printHeaderContent").innerHTML = `
     <div class="frd-print-title">${f.empresaNombre ? esc(f.empresaNombre) : "Análisis Financiero"}</div>
     <div class="frd-print-meta">Reporte generado el ${new Date().toLocaleDateString("es-MX",{year:"numeric",month:"long",day:"numeric"})} · Diagnóstico general: ${lastOverall ? esc(lastOverall.nivelLabel) + " (" + esc(lastOverall.cobertura.texto) + ")" : ""}</div>
+    ${lastOverall && lastOverall.deficitPatrimonial ? `<div class="frd-print-meta" style="font-weight:700;color:#9b1c1c;">⚠ ${esc(lastOverall.deficitPatrimonial.nota)}</div>` : ""}
     ${aviso ? `<div class="frd-print-meta" style="font-weight:700;color:#8a5a00;">⚠ ${esc(aviso)}</div>` : ""}
   `;
   document.body.classList.add(bodyClass);
@@ -5675,6 +5869,7 @@ async function exportExcel(btn) {
         [f.empresaNombre ? f.empresaNombre : "Análisis Financiero"],
         [`Generado el ${new Date().toLocaleDateString("es-MX",{year:"numeric",month:"long",day:"numeric"})} · Periodo: ${f.fechaInicio||"—"} a ${f.fechaFin||"—"} (${f.periodoDias} días)`],
         [aviso ? "⚠ " + aviso : `Situación general: ${lastOverall ? lastOverall.nivelLabel + " — " + lastOverall.cobertura.texto : ""}`],
+        ...(lastOverall && lastOverall.deficitPatrimonial ? [["⚠ " + lastOverall.deficitPatrimonial.nota]] : []),
         []
       ].concat(filasPlantilla(true));
       const ws1 = XLSX.utils.aoa_to_sheet(dataRows);
@@ -5731,7 +5926,7 @@ async function exportExcel(btn) {
       const wsV = XLSX.utils.aoa_to_sheet(valRows); wsV["!cols"] = [{wch:120}];
       XLSX.utils.book_append_sheet(wb, wsV, "Validación");
 
-      const diagRows = [["Diagnóstico general", lastOverall ? lastOverall.nivelLabel : ""], ["Cobertura", lastOverall ? lastOverall.cobertura.texto : ""]].concat(aviso ? [["Aviso", aviso]] : []).concat([[], ["Diagnóstico del Analista"]]);
+      const diagRows = [["Diagnóstico general", lastOverall ? lastOverall.nivelLabel : ""], ["Cobertura", lastOverall ? lastOverall.cobertura.texto : ""]].concat(lastOverall && lastOverall.deficitPatrimonial ? [["Regla de solvencia R-01", lastOverall.deficitPatrimonial.nota]] : []).concat(aviso ? [["Aviso", aviso]] : []).concat([[], ["Diagnóstico del Analista"]]);
       lastDiagnosis.forEach(p => diagRows.push([stripTags(p)]));
       const ws3 = XLSX.utils.aoa_to_sheet(diagRows);
       ws3["!cols"] = [{ wch: 110 }];
@@ -5781,6 +5976,7 @@ function buildDashboardExecutivoHTML(d) {
   const peor = d.ranking[0];
 
   const resumen = (d.overall.nivel==="sin_dato" ? ("No es posible emitir un veredicto general: " + esc(d.overall.motivo||"faltan datos") + " ") : ("La empresa presenta una situación financiera en nivel " + d.overall.nivelLabel + " (" + esc(d.overall.cobertura.texto) + "). ")) +
+    (d.overall.deficitPatrimonial ? (esc(d.overall.deficitPatrimonial.nota) + " ") : "") +
     (debiles.length ? ("El principal punto de atención es " + peor.indicador + " (" + peor.valor + " vs meta " + peor.meta + "), en nivel " + peor.nivelLabel + ". ") : (d.ratios.some(r=>r.nivel==="sin_dato") ? "Ninguno de los indicadores evaluables está en nivel MALO o PÉSIMO; los no interpretables requieren datos. " : "Todos los indicadores están dentro de un rango saludable. ")) +
     (d.capital.total>0 ? ("Existe una oportunidad de liberar aproximadamente " + money(d.capital.total) + " de efectivo mejorando " + [d.capital.dsoLib>0?"la cobranza":null, d.capital.inventarioLib>0?"el inventario":null].filter(Boolean).join(" y ") + ". ") : "") +
     (debiles.length ? ("El riesgo principal se concentra en " + debiles.map(r=>r.name).join(", ") + ".") : "El reto ahora es mantener la disciplina financiera actual.") +
@@ -5851,6 +6047,7 @@ function buildDashboardExecutivoHTML(d) {
 
   const conclusion =
     (d.overall.nivel==="sin_dato" ? "Con la información disponible no se puede emitir un veredicto general. " : ("La empresa se encuentra en una situación financiera en nivel " + d.overall.nivelLabel + ". ")) +
+    (d.overall.deficitPatrimonial ? ("El capital contable es negativo (" + money(d.overall.deficitPatrimonial.capital) + "): " + (d.overall.deficitPatrimonial.aplicado ? "por la regla de solvencia R-01 el veredicto se limita a REGULAR. " : "por la regla de solvencia R-01 el veredicto no puede ser mejor que REGULAR. ")) : "") +
     (debiles.length ? ("El principal problema es " + peor.indicador + ", y el principal riesgo es que " + (d.combined[0] ? d.combined[0].text.toLowerCase() : "los problemas detectados se agraven si no se atienden en el plazo sugerido") + ". ") : "No se detectan problemas urgentes. ") +
     (d.capital.total>0 ? ("La principal oportunidad es liberar cerca de " + money(d.capital.total) + " de capital de trabajo. ") : "") +
     "La acción recomendada es iniciar de inmediato con: " + (d.top5[0] ? d.top5[0].accion : "mantener el seguimiento mensual de los 7 indicadores clave") + ".";
@@ -5864,7 +6061,7 @@ function buildDashboardExecutivoHTML(d) {
       "<h1>"+(esc(d.empresa)||"Análisis Financiero")+"</h1>" +
       "<p class='periodo'>"+(d.periodo?("Periodo analizado: "+esc(d.periodo)+" · "):"")+"Fecha del diagnóstico: "+d.fecha+" · Sector: "+esc((SECTORES.find(s=>s.toLowerCase()===f.sector)||"")+(f.subsector?(" — "+f.subsector):""))+"</p>" +
       (d.aviso ? "<p class='periodo' style='color:#8a5a00;font-weight:700;'>⚠ "+esc(d.aviso)+"</p>" : "") +
-      "<div class='stamp-lg bg-"+d.overall.nivel+" lv-"+d.overall.nivel+" bd-"+d.overall.nivel+"'><span>ESTADO FINANCIERO GENERAL</span><b>"+NIVEL_ICON[d.overall.nivel]+" "+d.overall.nivelLabel+"</b><span style='font-size:11px;margin-top:4px;'>"+esc(d.overall.cobertura.texto)+"</span></div></div>"},
+      "<div class='stamp-lg bg-"+d.overall.nivel+" lv-"+d.overall.nivel+" bd-"+d.overall.nivel+"'><span>ESTADO FINANCIERO GENERAL</span><b>"+NIVEL_ICON[d.overall.nivel]+" "+d.overall.nivelLabel+"</b><span style='font-size:11px;margin-top:4px;'>"+esc(d.overall.cobertura.texto)+"</span>"+(d.overall.deficitPatrimonial ? "<span style='font-size:11px;margin-top:4px;font-weight:700;'>⚠ Capital contable negativo · tope R-01</span>" : "")+"</div></div>"},
     {id:"resumen", title:"Resumen Ejecutivo", body: "<p class='big-text'>"+resumen+"</p>"},
     {id:"estado", title:"Indicadores Financieros", body: "<div class='kpi-grid'>"+kpiTiles+"</div>"},
     {id:"problemas", title:"Principales Problemas Financieros", body:
